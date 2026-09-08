@@ -1,0 +1,8 @@
+{
+  "headers": [
+    {
+      "source": "/app.jsx",
+      "headers": [{ "key": "Content-Type", "value": "text/babel; charset=utf-8" }]
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin Roadmap — Arena Club</title>
+
+  <!--
+    No build step, matching the other internal tools: React, Tailwind and the
+    JSX transform all come from CDNs, and app.jsx is served as a static file.
+    Babel transpiles in the browser on load, which costs roughly a second on
+    a cold cache. If that ever bothers anyone, the swap is to precompile
+    app.jsx to app.js and drop the two Babel lines.
+  -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+
+  <style>
+    html, body { margin: 0; padding: 0; background: #F6F7F8; }
+    #boot {
+      font: 15px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #7B838C; padding: 48px;
+    }
+    /* the in-browser transform runs after paint; hide the flash */
+    #root:empty + #boot { display: block; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <div id="boot">Loading the roadmap…</div>
+
+  <script type="text/babel" data-type="module" src="/app.jsx"></script>
+  <script>
+    // clear the placeholder once React has mounted something
+    const obs = new MutationObserver(() => {
+      const root = document.getElementById("root");
+      if (root && root.childNodes.length) {
+        const boot = document.getElementById("boot");
+        if (boot) boot.remove();
+        obs.disconnect();
+      }
+    });
+    obs.observe(document.getElementById("root"), { childList: true });
+
+    window.addEventListener("error", (e) => {
+      const boot = document.getElementById("boot");
+      if (boot) boot.textContent = "Failed to load: " + (e.message || "unknown error");
+    });
+  </script>
+</body>
+</html>
