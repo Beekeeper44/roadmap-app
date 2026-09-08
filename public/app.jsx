@@ -11,13 +11,42 @@ const store = {
     if (j.value == null) throw new Error("no saved state yet");
     return { key, value: j.value, updatedAt: j.updatedAt };
   },
-  async set(key, value) {
+  /* A save that fails should not lose the board. Mirror it locally first,
+     then retry the server a few times before giving up. */
+  cache(key, value) {
+    try { localStorage.setItem(`${key}::pending`, value); } catch (e) {}
+  },
+  clearCache(key) {
+    try { localStorage.removeItem(`${key}::pending`); } catch (e) {}
+  },
+  readCache(key) {
+    try { return localStorage.getItem(`${key}::pending`); } catch (e) { return null; }
+  },
+
+  async set(key, value, attempt = 0) {
+    this.cache(key, value);
     const r = await fetch("/api/state", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key, value }),
     });
-    if (!r.ok) throw new Error(`save failed: ${r.status}`);
+    if (!r.ok) {
+      /* the server knows why this failed — say so, rather than making
+         everyone go and read the function logs */
+      let detail = `HTTP ${r.status}`;
+      try {
+        const j = await r.json();
+        if (j && j.error) detail = j.error;
+      } catch (e) { /* not JSON — keep the status */ }
+
+      // a cold function or a brief network blip deserves another go
+      if (attempt < 2 && (r.status >= 500 || r.status === 0)) {
+        await new Promise((ok) => setTimeout(ok, 400 * (attempt + 1)));
+        return this.set(key, value, attempt + 1);
+      }
+      throw new Error(detail);
+    }
+    this.clearCache(key);
     return r.json();
   },
 };
@@ -659,6 +688,7 @@ function Roadmap() {
   const [events, setEvents] = useState([]);        // status + board change log
   const [histFilter, setHistFilter] = useState("All changes");
   const [saveState, setSaveState] = useState("idle");
+  const [saveError, setSaveError] = useState("");
   const [newCount, setNewCount] = useState(0);
   const [sortDir, setSortDir] = useState("asc");
   const [query, setQuery] = useState("");
@@ -699,10 +729,18 @@ function Roadmap() {
 
   useEffect(() => {
     (async () => {
+      let r = null;
       try {
-        const r = await store.get(KEY);
-        if (r && r.value) {
-          const p = JSON.parse(r.value);
+        r = await store.get(KEY);
+      } catch (e) {
+        /* nothing saved yet, or the server is unreachable — fall through to
+           whatever is cached locally, then to the seed */
+      }
+      try {
+        const pending = store.readCache(KEY);
+        const raw = pending || (r && r.value);
+        if (raw) {
+          const p = JSON.parse(raw);
           if (p && Array.isArray(p.items) && p.items.length) {
             /* saved rows win — they carry your edits. Seed rows that are
                new since you last loaded get appended, unless you deleted
@@ -732,8 +770,8 @@ function Roadmap() {
         .set(KEY, JSON.stringify({
           items, decisions, risks, events, removed: Array.from(removedIds),
         }))
-        .then(() => setSaveState("saved"))
-        .catch(() => setSaveState("error"));
+        .then(() => { setSaveState("saved"); setSaveError(""); })
+        .catch((err) => { setSaveState("error"); setSaveError(String(err.message || err)); });
     }, 600);
     return () => clearTimeout(t);
   }, [items, decisions, risks, events, removedIds, loaded]);
@@ -1172,7 +1210,12 @@ function Roadmap() {
               fontWeight: saveState === "error" ? 600 : 400,
             }}>
               {saveState === "saving" ? "Saving\u2026"
-                : saveState === "error" ? "Not saved \u2014 check your connection"
+                : saveState === "error"
+                  ? <a href="/api/health" target="_blank" rel="noreferrer"
+                       title={saveError}
+                       style={{ color: "inherit", textDecoration: "underline" }}>
+                      Not saved: {saveError || "unknown error"} \u2014 open /api/health
+                    </a>
                 : saveState === "saved" ? "Saved" : "\u00A0"}
             </span>
             <span className="text-sm" style={{ color: C.faint }}>

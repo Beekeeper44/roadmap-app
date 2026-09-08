@@ -21,11 +21,42 @@ schema.sql          one table
 directory — it is a static site plus one function, so leave both blank and let
 the framework preset be **Other**.
 
-**3. Environment variable.** Add `DATABASE_URL` with the Neon pooled connection
-string, for Production, Preview and Development. This is the same variable name
-the other tools use.
+**3. Environment variable.** Add `DATABASE_URL` with the Neon **pooled**
+connection string, for Production, Preview and Development. If you attached the
+database through the Vercel Neon integration instead, it sets `POSTGRES_URL` —
+the API accepts either, along with a few other common names, so you do not have
+to rename anything.
+
+**Environment variables are baked in at build time.** Adding one to a project
+that is already deployed does nothing until you redeploy. That single fact
+accounts for most "connected to Neon but not saving" reports.
 
 **4. Deploy.** First load writes nothing; the first edit creates the row.
+
+## When saving fails
+
+Open **`/api/health`** on the deployment. It checks four things in order and
+tells you which one broke:
+
+```json
+{ "env": true, "connects": true, "table": true, "writable": true, "ok": true }
+```
+
+- `env: false` — `DATABASE_URL` is not set on this deployment. Add it for
+  Production, Preview and Development, then **redeploy** — environment
+  variables do not apply to existing deployments.
+- `connects: false` — the connection string is wrong. Copy the **pooled**
+  string from Neon again; the direct one can fail from serverless functions.
+- `table: false` — run `schema.sql`. The app also creates the table on demand,
+  so this usually means the role lacks permission.
+- `writable: false` — the role can read but not write. Use the owner role.
+
+The masthead shows the actual error text and links here, so you should not need
+the function logs.
+
+A failed save is not a lost board. Every save is mirrored to the browser first,
+retried twice against the server, and reloaded from that mirror if the page is
+refreshed before the server catches up.
 
 ## How saving works
 
