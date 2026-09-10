@@ -2,17 +2,9 @@
 const { useState, useEffect, useMemo, useRef } = React;
 
 /* Storage: same shape as the browser API it replaces, backed by Neon
-   through /api/state so everyone sees the same board. */
+   through /api/state so everyone sees the same board. Saves are mirrored
+   locally first, so a failed write never loses the board. */
 const store = {
-  async get(key) {
-    const r = await fetch(`/api/state?key=${encodeURIComponent(key)}`);
-    if (!r.ok) throw new Error(`load failed: ${r.status}`);
-    const j = await r.json();
-    if (j.value == null) throw new Error("no saved state yet");
-    return { key, value: j.value, updatedAt: j.updatedAt };
-  },
-  /* A save that fails should not lose the board. Mirror it locally first,
-     then retry the server a few times before giving up. */
   cache(key, value) {
     try { localStorage.setItem(`${key}::pending`, value); } catch (e) {}
   },
@@ -23,6 +15,14 @@ const store = {
     try { return localStorage.getItem(`${key}::pending`); } catch (e) { return null; }
   },
 
+  async get(key) {
+    const r = await fetch(`/api/state?key=${encodeURIComponent(key)}`);
+    if (!r.ok) throw new Error(`load failed: ${r.status}`);
+    const j = await r.json();
+    if (j.value == null) throw new Error("no saved state yet");
+    return { key, value: j.value, updatedAt: j.updatedAt };
+  },
+
   async set(key, value, attempt = 0) {
     this.cache(key, value);
     const r = await fetch("/api/state", {
@@ -31,15 +31,11 @@ const store = {
       body: JSON.stringify({ key, value }),
     });
     if (!r.ok) {
-      /* the server knows why this failed — say so, rather than making
-         everyone go and read the function logs */
       let detail = `HTTP ${r.status}`;
       try {
         const j = await r.json();
         if (j && j.error) detail = j.error;
       } catch (e) { /* not JSON — keep the status */ }
-
-      // a cold function or a brief network blip deserves another go
       if (attempt < 2 && (r.status >= 500 || r.status === 0)) {
         await new Promise((ok) => setTimeout(ok, 400 * (attempt + 1)));
         return this.set(key, value, attempt + 1);
@@ -90,10 +86,10 @@ const BOARDS = {
     label: "Admin roadmap",
     title: "Admin Roadmap — Discovery & Status Update",
     byline: "Prepared by Sumit, India Team Lead · August 31, 2026 · Source: 6 PRDs, 8/18 Ops discovery call, Admin Roadmap brief",
-    /* No "Shipped" here on purpose. Setting an item to History is how it
-       ships — it leaves this board and appears under History, badged
-       Shipped, with the date it landed. */
-    statuses: ["In progress", "Ready to build", "Blocked", "Deferred / other", "Needs discovery", "History"],
+    /* Shipped is terminal: choosing it stamps the finish date, takes the row
+       off this board, and files it under History. It sits last in the list
+       because it is an exit, not a stage. */
+    statuses: ["In progress", "Ready to build", "Blocked", "Deferred / other", "Needs discovery", "Shipped"],
     columns: [
       { key: "item",        label: "PRD name",                w: 1.3 },
       { key: "phase",       label: "Phase",                   w: 0.9 },
@@ -101,6 +97,7 @@ const BOARDS = {
       { key: "status",      label: "Readiness",               px: 165, badge: true },
       { key: "due",         label: "Due",                     px: 175, due: true },
       { key: "owner",       label: "Owner",                   w: 0.8 },
+      { key: "developer",   label: "Developer",               w: 0.9 },
       { key: "estimate",    label: "Est. (days)",             px: 100, num: true },
       { key: "blockers",    label: "Dependencies / blockers", w: 1.6, clamp: 3 },
       { key: "notes",       label: "Notes",                   w: 1.8, clamp: 3 },
@@ -121,6 +118,7 @@ const BOARDS = {
       { key: "status",   label: "Status",            px: 165, badge: true },
       { key: "due",      label: "Due",               px: 175, due: true },
       { key: "owner",    label: "Requested by",      w: 0.9 },
+      { key: "developer", label: "Developer",        w: 0.9 },
       { key: "teams",    label: "Teams impacted",    w: 1.1, clamp: 2 },
       { key: "impact",   label: "Business impact",   w: 1.4, clamp: 3 },
       { key: "notes",    label: "Notes",             w: 1.4, clamp: 3 },
@@ -354,6 +352,7 @@ const PRD = [
   },
 ].map((r) => ({
   ...r, id: slug("prd", r.item, r.phase), board: "prd", type: "",
+  developer: r.developer || "",
   analysisDoc: r.analysisDoc || "",
   due: r.due || "",
   finished: r.status === "Shipped" ? (r.finished || "") : "",
@@ -365,6 +364,7 @@ const mk = (item, status, owner, next, task, opts = {}) => ({
   id: slug("intake", item), board: "intake", item, status, owner, next, task,
   phase: opts.phase || "—", type: opts.type || "", notes: opts.notes || "",
   due: opts.due || "", finished: opts.finished || "",
+  developer: opts.developer || "",
   blockers: opts.blockers || "", estimate: "", teams: opts.teams || "",
   impact: opts.impact || "",
 });
@@ -573,8 +573,10 @@ NOT_COVERED.forEach((i) => {
   if (IN_FLIGHT.includes(i.status)) { i.board = "prd"; i.phase = i.phase || "—"; }
 });
 
+/* "History" is only ever seen in data saved by an earlier version — fold it
+   back to Shipped so both names cannot coexist. */
 const SEED = [...PRD, ...NOT_COVERED].map((i) =>
-  i.status === "Shipped" ? { ...i, status: "History", finished: i.finished || "" } : i
+  i.status === "History" ? { ...i, status: "Shipped" } : i
 );
 
 /* open questions holding up work — each names what it blocks */
@@ -791,7 +793,7 @@ function Roadmap() {
   const searched = mine.filter((i) => {
     if (!query) return true;
     const q = query.toLowerCase();
-    return [i.item, i.task, i.owner, i.next, i.notes, i.blockers, i.phase, i.teams]
+    return [i.item, i.task, i.owner, i.developer, i.next, i.notes, i.blockers, i.phase, i.teams]
       .filter(Boolean).join(" ").toLowerCase().includes(q);
   });
 
@@ -1126,7 +1128,7 @@ function Roadmap() {
   const addItem = () => {
     const fresh = {
       id: `new-${Date.now()}`, board, item: "New item", phase: "—", status: "Needs discovery",
-      owner: "", next: "Write spec / define scope", task: "", notes: "",
+      owner: "", developer: "", next: "Write spec / define scope", task: "", notes: "",
       blockers: "", estimate: "", teams: "", impact: "", type: "",
     };
     setItems((p) => [fresh, ...p]);
@@ -1211,10 +1213,9 @@ function Roadmap() {
             }}>
               {saveState === "saving" ? "Saving\u2026"
                 : saveState === "error"
-                  ? <a href="/api/health" target="_blank" rel="noreferrer"
-                       title={saveError}
+                  ? <a href="/api/health" target="_blank" rel="noreferrer" title={saveError}
                        style={{ color: "inherit", textDecoration: "underline" }}>
-                      Not saved: {saveError || "unknown error"} \u2014 open /api/health
+                      Not saved: {saveError || "unknown error"}
                     </a>
                 : saveState === "saved" ? "Saved" : "\u00A0"}
             </span>
@@ -1288,6 +1289,9 @@ function Roadmap() {
                     <span style={{ width: 130 }}><Badge status="Shipped" /></span>
                     <span className="text-base" style={{ flex: "1 1 0", color: i.owner ? C.ink : C.faint }}>
                       {i.owner || "—"}
+                    </span>
+                    <span className="text-base" style={{ flex: "1 1 0", color: i.developer ? C.ink : C.faint }}>
+                      {i.developer || "—"}
                     </span>
                     <span className="text-base shrink-0" style={{ width: 175, color: C.ink }}>
                       {i.finished
@@ -1442,7 +1446,7 @@ function Roadmap() {
         </p>
 
         <div className="flex flex-wrap gap-2.5 mb-9">
-          {cfg.statuses.filter((st) => st !== "History").map((s) => (
+          {cfg.statuses.filter((st) => !ARCHIVED.includes(st)).map((s) => (
             <Stat key={s} status={s} count={countOf(s)}
                   active={filter === s}
                   isDropTarget={dropTarget === s && !!dragId}
@@ -1458,11 +1462,11 @@ function Roadmap() {
           <Stat status="Shipped"
                 count={archived.filter((i) => board === "history" || i.board === board).length}
                 active={false}
-                isDropTarget={dropTarget === "History" && !!dragId}
+                isDropTarget={dropTarget === "Shipped" && !!dragId}
                 onClick={() => { setBoard("history"); setOpenId(null); }}
                 onDrop={(e) => {
                   e.preventDefault();
-                  if (dragId) patch(dragId, { status: "History" });
+                  if (dragId) patch(dragId, { status: "Shipped" });
                   setDragId(null); setDropTarget(null);
                 }} />
         </div>
@@ -1482,7 +1486,7 @@ function Roadmap() {
         </div>
 
         <div className="flex flex-wrap gap-1.5 mt-3 mb-4">
-          {["All items", ...cfg.statuses.filter((st) => st !== "History")].map((s) => {
+          {["All items", ...cfg.statuses.filter((st) => !ARCHIVED.includes(st))].map((s) => {
             const on = filter === s;
             const drop = dropTarget === s && dragId && s !== "All items";
             return (
@@ -1511,7 +1515,7 @@ function Roadmap() {
 
         {/* table — scrolls sideways so nothing gets crushed */}
         <div className="overflow-x-auto" style={{ borderTop: `1px solid ${C.rule}` }}>
-         <div style={{ minWidth: board === "prd" ? 1720 : 1560 }}>
+         <div style={{ minWidth: board === "prd" ? 1880 : 1720 }}>
           <div className="hidden sm:flex gap-4 px-3 py-3.5 text-sm"
                style={{ color: C.mute, borderBottom: `1px solid ${C.rule}` }}>
             <span style={{ width: 26, flexShrink: 0 }} />
@@ -1783,6 +1787,14 @@ function Roadmap() {
                       style={{ color: C.mute, border: `1px solid ${C.rule}` }}>Close</button>
             </div>
 
+            {/* names already in use, so the same person is not spelled
+                three ways across the board */}
+            <datalist id="developer-names">
+              {Array.from(new Set(items.map((i) => i.developer).filter(Boolean)))
+                .sort()
+                .map((n) => <option key={n} value={n} />)}
+            </datalist>
+
             <input
               value={open.item}
               onChange={(e) => patch(open.id, { item: e.target.value })}
@@ -1804,6 +1816,13 @@ function Roadmap() {
                 </span>
                 <input style={inputStyle} value={open.owner || ""}
                        onChange={(e) => patch(open.id, { owner: e.target.value })} />
+              </label>
+              <label className="block">
+                <span className="block text-sm mb-2" style={{ color: C.mute }}>Developer</span>
+                <input style={inputStyle} value={open.developer || ""}
+                       placeholder="Who is building it"
+                       list="developer-names"
+                       onChange={(e) => patch(open.id, { developer: e.target.value })} />
               </label>
               <label className="block">
                 <span className="block text-sm mb-2" style={{ color: C.mute }}>
