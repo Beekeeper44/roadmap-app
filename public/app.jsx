@@ -179,6 +179,28 @@ const compressImage = (file, maxPx = 1600, quality = 0.72) =>
     reader.readAsDataURL(file);
   });
 
+/* A URL pasted without a scheme resolves relative to this app, which sends
+   you somewhere useless. Add https:// when it is missing. */
+const asHref = (v) => {
+  const t = String(v || "").trim();
+  if (!t) return "";
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(t) ? t : `https://${t}`;
+};
+
+/* Chrome and Safari block opening a data: URL in a new tab, which is what a
+   thumbnail link would be. Convert to a blob URL first. */
+const openInNewTab = async (dataUrl, name) => {
+  try {
+    const blob = await (await fetch(dataUrl)).blob();
+    const url = URL.createObjectURL(blob);
+    const win = window.open(url, "_blank");
+    if (!win) URL.revokeObjectURL(url);          // popup blocked
+    else setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) {
+    /* ignore — the in-app viewer still works */
+  }
+};
+
 /* Shipped is the old name, History the new one — both mean archived, and
    both display as Shipped in the History view. */
 const ARCHIVED = ["Shipped", "History"];
@@ -750,6 +772,8 @@ function Roadmap() {
   const [imgBusy, setImgBusy] = useState(false);
   const [imgError, setImgError] = useState("");
   const [dropping, setDropping] = useState(false);
+  const [lightbox, setLightbox] = useState(null);   // { id, name }
+  const [armedDelete, setArmedDelete] = useState(null);
   const [newCount, setNewCount] = useState(0);
   const [sortDir, setSortDir] = useState("asc");
   const [query, setQuery] = useState("");
@@ -764,6 +788,7 @@ function Roadmap() {
      field, and not on a focused button, where space means "press me" */
   useEffect(() => {
     const onKey = (e) => {
+      if (e.key === "Escape" && lightbox) { setLightbox(null); setArmedDelete(null); return; }
       if (e.key !== " " && e.code !== "Space") return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const t = e.target;
@@ -778,7 +803,7 @@ function Roadmap() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [lightbox]);
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -1888,6 +1913,78 @@ function Roadmap() {
         )}
       </div>
 
+      {/* full-size image viewer — above the drawer, Esc or backdrop to close */}
+      {lightbox && (
+        <div
+          onClick={() => { setLightbox(null); setArmedDelete(null); }}
+          style={{
+            position: "fixed", inset: 0, zIndex: 50,
+            background: "rgba(16,19,22,0.86)",
+            display: "flex", flexDirection: "column",
+          }}>
+          <div className="flex items-center gap-3 px-5 py-3"
+               onClick={(e) => e.stopPropagation()}
+               style={{ color: "#fff" }}>
+            <span className="text-base truncate" style={{ flex: 1 }}>{lightbox.name}</span>
+
+            <button
+              onClick={() => openInNewTab(imgCache[lightbox.id], lightbox.name)}
+              className="text-sm px-3 py-1.5 rounded"
+              style={{ border: "1px solid rgba(255,255,255,0.35)", background: "transparent",
+                       color: "#fff", cursor: "pointer" }}>
+              Open in new tab
+            </button>
+
+            <a href={imgCache[lightbox.id]} download={lightbox.name || "image.jpg"}
+               className="text-sm px-3 py-1.5 rounded"
+               style={{ border: "1px solid rgba(255,255,255,0.35)", color: "#fff",
+                        textDecoration: "none" }}>
+              Download
+            </a>
+
+            {armedDelete === lightbox.id ? (
+              <button
+                onClick={() => {
+                  if (open) removeImage(open.id, lightbox.id);
+                  setArmedDelete(null); setLightbox(null);
+                }}
+                className="text-sm px-3 py-1.5 rounded"
+                style={{ background: STATUS.Blocked.bg, color: STATUS.Blocked.fg,
+                         border: "none", cursor: "pointer" }}>
+                Delete for good?
+              </button>
+            ) : (
+              <button
+                onClick={() => setArmedDelete(lightbox.id)}
+                className="text-sm px-3 py-1.5 rounded"
+                style={{ border: "1px solid rgba(255,255,255,0.35)", background: "transparent",
+                         color: "#fff", cursor: "pointer" }}>
+                Delete
+              </button>
+            )}
+
+            <button onClick={() => { setLightbox(null); setArmedDelete(null); }}
+                    className="text-sm px-3 py-1.5 rounded"
+                    style={{ border: "1px solid rgba(255,255,255,0.35)", background: "transparent",
+                             color: "#fff", cursor: "pointer" }}>
+              Close
+            </button>
+          </div>
+
+          <div className="flex-1 flex items-center justify-center px-5 pb-5"
+               onClick={() => { setLightbox(null); setArmedDelete(null); }}>
+            {imgCache[lightbox.id] ? (
+              <img src={imgCache[lightbox.id]} alt={lightbox.name}
+                   onClick={(e) => e.stopPropagation()}
+                   style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain",
+                            borderRadius: 8 }} />
+            ) : (
+              <span style={{ color: "#fff" }}>Loading…</span>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* detail */}
       {open && (
         <>
@@ -1990,15 +2087,17 @@ function Roadmap() {
                 ["adminUrl", "Admin URL", "https://admin.arenaclub.com/…"],
               ].map(([key, label, placeholder]) => (
                 <label key={key} className="block">
-                  <span className="flex items-baseline gap-2 text-sm mb-2" style={{ color: C.mute }}>
-                    {label}
-                    {open[key] && (
-                      <a href={open[key]} target="_blank" rel="noreferrer"
-                         style={{ color: C.accent, textDecoration: "underline" }}>open</a>
-                    )}
-                  </span>
+                  <span className="block text-sm mb-2" style={{ color: C.mute }}>{label}</span>
                   <input style={inputStyle} value={open[key] || ""} placeholder={placeholder}
                          onChange={(e) => patch(open.id, { [key]: e.target.value })} />
+                  {open[key] && open[key].trim() && (
+                    <a href={asHref(open[key])} target="_blank" rel="noreferrer"
+                       title={asHref(open[key])}
+                       className="block text-sm mt-1.5 truncate"
+                       style={{ color: C.accent, textDecoration: "underline" }}>
+                      {open[key].replace(/^https?:\/\//i, "")} ↗
+                    </a>
+                  )}
                 </label>
               ))}
             </div>
@@ -2103,21 +2202,41 @@ function Roadmap() {
                     <div key={img.id} className="rounded-lg overflow-hidden"
                          style={{ border: `1px solid ${C.rule}`, width: 148 }}>
                       {imgCache[img.id] ? (
-                        <a href={imgCache[img.id]} target="_blank" rel="noreferrer" title={img.name}>
+                        <button onClick={() => setLightbox(img)} title="Click to view full size"
+                                style={{ display: "block", width: "100%", padding: 0,
+                                         border: "none", background: "none", cursor: "zoom-in" }}>
                           <img src={imgCache[img.id]} alt={img.name}
                                style={{ width: "100%", height: 96, objectFit: "cover", display: "block" }} />
-                        </a>
+                        </button>
                       ) : (
-                        <div style={{ height: 96, background: C.shell }} />
+                        <div className="flex items-center justify-center text-sm"
+                             style={{ height: 96, background: C.shell, color: C.faint }}>
+                          loading…
+                        </div>
                       )}
                       <div className="flex items-center gap-2 px-2 py-1.5">
-                        <span className="text-sm truncate" style={{ color: C.body, flex: 1 }}>
+                        <span className="text-sm truncate" style={{ color: C.body, flex: 1 }}
+                              title={img.name}>
                           {img.name}
                         </span>
-                        <button onClick={() => removeImage(open.id, img.id)}
-                                title="Remove this image" className="text-sm"
-                                style={{ color: C.faint, border: "none", background: "none",
-                                         cursor: "pointer" }}>×</button>
+                        {armedDelete === img.id ? (
+                          <button
+                            onClick={() => { removeImage(open.id, img.id); setArmedDelete(null); }}
+                            className="text-sm px-2 rounded shrink-0"
+                            style={{ background: STATUS.Blocked.bg, color: STATUS.Blocked.fg,
+                                     border: "none", cursor: "pointer" }}>
+                            Sure?
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => setArmedDelete(img.id)}
+                            title="Delete this image"
+                            className="text-base px-1.5 rounded shrink-0"
+                            style={{ color: C.mute, border: `1px solid ${C.rule}`,
+                                     background: "#fff", cursor: "pointer" }}>
+                            ×
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))}
