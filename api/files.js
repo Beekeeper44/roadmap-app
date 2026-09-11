@@ -32,9 +32,10 @@ export default async function handler(req, res) {
       if (!id || typeof data !== "string") {
         return res.status(400).json({ error: "id and a data URL string are required" });
       }
-      // ~6MB of base64 is about 4.5MB of image; the client downscales well below this
+      // 8M characters of base64 is about 6MB of file. Images are downscaled
+      // far below this; PDFs are capped at 5MB in the browser.
       if (data.length > 8_000_000) {
-        return res.status(413).json({ error: "image is too large after resizing" });
+        return res.status(413).json({ error: "file is too large (limit is about 6MB)" });
       }
 
       await sql`

@@ -156,6 +156,24 @@ const files = {
   },
 };
 
+/* PDFs go in whole — no downscaling to do. The ceiling is the 8M characters
+   the files endpoint accepts, and base64 costs about a third on top, so the
+   real limit is a little over 5MB of PDF. */
+const PDF_LIMIT = 5 * 1024 * 1024;
+
+const readAsDataUrl = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`could not read ${file.name}`));
+    reader.onload = () => resolve(reader.result);
+    reader.readAsDataURL(file);
+  });
+
+const prettySize = (bytes) =>
+  bytes > 1024 * 1024
+    ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
+    : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+
 /* Downscale before storing. A phone screenshot is several megabytes and
    nobody needs that to read a UI mock. */
 const compressImage = (file, maxPx = 1600, quality = 0.72) =>
@@ -428,7 +446,7 @@ const PRD = [
 ].map((r) => ({
   ...r, id: slug("prd", r.item, r.phase), board: "prd", type: "",
   developer: r.developer || "",
-  prdLink: r.prdLink || "", adminUrl: r.adminUrl || "", images: r.images || [],
+  prdFile: r.prdFile || null, adminUrl: r.adminUrl || "", images: r.images || [],
   analysisDoc: r.analysisDoc || "",
   due: r.due || "",
   finished: r.status === "Shipped" ? (r.finished || "") : "",
@@ -441,7 +459,7 @@ const mk = (item, status, owner, next, task, opts = {}) => ({
   phase: opts.phase || "—", type: opts.type || "", notes: opts.notes || "",
   due: opts.due || "", finished: opts.finished || "",
   developer: opts.developer || "",
-  prdLink: opts.prdLink || "", adminUrl: opts.adminUrl || "", images: [],
+  prdFile: null, adminUrl: opts.adminUrl || "", images: [],
   blockers: opts.blockers || "", estimate: "", teams: opts.teams || "",
   impact: opts.impact || "",
 });
@@ -774,6 +792,11 @@ function Roadmap() {
   const [dropping, setDropping] = useState(false);
   const [lightbox, setLightbox] = useState(null);   // { id, name }
   const [armedDelete, setArmedDelete] = useState(null);
+  const [prdCache, setPrdCache] = useState({});
+  const [prdBusy, setPrdBusy] = useState(false);
+  const [prdError, setPrdError] = useState("");
+  const [prdDrop, setPrdDrop] = useState(false);
+  const [armedPrd, setArmedPrd] = useState(false);
   const [newCount, setNewCount] = useState(0);
   const [sortDir, setSortDir] = useState("asc");
   const [query, setQuery] = useState("");
@@ -983,6 +1006,56 @@ function Roadmap() {
       patch(itemId, { images: [...((current && current.images) || []), ...added] });
     }
     setImgBusy(false);
+  };
+
+  /* One PRD per item. Attaching a second replaces the first and deletes the
+     old file, rather than leaving an orphan taking up space. */
+  const setPrdFile = async (itemId, fileList) => {
+    const file = Array.from(fileList || [])[0];
+    if (!file) return;
+    setPrdError("");
+
+    if (file.type && file.type !== "application/pdf" && !/\.pdf$/i.test(file.name)) {
+      setPrdError(`${file.name} is not a PDF`);
+      return;
+    }
+    if (file.size > PDF_LIMIT) {
+      setPrdError(`${file.name} is ${prettySize(file.size)} — the limit is ${prettySize(PDF_LIMIT)}`);
+      return;
+    }
+
+    setPrdBusy(true);
+    try {
+      const dataUrl = await readAsDataUrl(file);
+      const id = `pdf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      await files.put(id, { dataUrl, name: file.name });
+
+      const current = items.find((i) => i.id === itemId);
+      const previous = current && current.prdFile;
+      patch(itemId, { prdFile: { id, name: file.name, size: file.size } });
+      setPrdCache((c) => ({ ...c, [id]: dataUrl }));
+      if (previous && previous.id) await files.del(previous.id);
+    } catch (err) {
+      setPrdError(String(err.message || err));
+    }
+    setPrdBusy(false);
+  };
+
+  const openPrd = async (rec) => {
+    if (!rec) return;
+    let dataUrl = prdCache[rec.id];
+    if (!dataUrl) {
+      const stored = await files.get(rec.id);
+      dataUrl = stored && stored.dataUrl;
+      if (dataUrl) setPrdCache((c) => ({ ...c, [rec.id]: dataUrl }));
+    }
+    if (dataUrl) openInNewTab(dataUrl, rec.name);
+    else setPrdError("That file is missing from storage.");
+  };
+
+  const removePrd = async (itemId, rec) => {
+    patch(itemId, { prdFile: null });
+    if (rec && rec.id) await files.del(rec.id);
   };
 
   const removeImage = async (itemId, imgId) => {
@@ -1248,7 +1321,7 @@ function Roadmap() {
     const fresh = {
       id: `new-${Date.now()}`, board, item: "New item", phase: "—", status: "Needs discovery",
       owner: "", developer: "", next: "Write spec / define scope", task: "", notes: "",
-      prdLink: "", adminUrl: "", images: [],
+      prdFile: null, adminUrl: "", images: [],
       blockers: "", estimate: "", teams: "", impact: "", type: "",
     };
     setItems((p) => [fresh, ...p]);
@@ -1281,6 +1354,8 @@ function Roadmap() {
   const open = items.find((i) => i.id === openId) || null;
 
   /* fetch only what the open row needs, once */
+  useEffect(() => { setArmedPrd(false); setArmedDelete(null); setPrdError(""); }, [openId]);
+
   useEffect(() => {
     if (!open || !open.images || !open.images.length) return;
     let cancelled = false;
@@ -2081,26 +2156,100 @@ function Roadmap() {
               </label>
             </div>
 
-            <div className="grid grid-cols-2 gap-3 mt-4">
-              {[
-                ["prdLink", "PRD link", "https://…"],
-                ["adminUrl", "Admin URL", "https://admin.arenaclub.com/…"],
-              ].map(([key, label, placeholder]) => (
-                <label key={key} className="block">
-                  <span className="block text-sm mb-2" style={{ color: C.mute }}>{label}</span>
-                  <input style={inputStyle} value={open[key] || ""} placeholder={placeholder}
-                         onChange={(e) => patch(open.id, { [key]: e.target.value })} />
-                  {open[key] && open[key].trim() && (
-                    <a href={asHref(open[key])} target="_blank" rel="noreferrer"
-                       title={asHref(open[key])}
-                       className="block text-sm mt-1.5 truncate"
-                       style={{ color: C.accent, textDecoration: "underline" }}>
-                      {open[key].replace(/^https?:\/\//i, "")} ↗
-                    </a>
+            {/* PRD lives as a PDF, so this is a file rather than a link */}
+            <div className="mt-4">
+              <span className="block text-sm mb-2" style={{ color: C.mute }}>PRD (PDF)</span>
+
+              {open.prdFile ? (
+                <div className="flex flex-wrap items-center gap-2 rounded-lg px-3 py-2.5"
+                     style={{ border: `1px solid ${C.rule}`, background: "#FCFCFD" }}>
+                  <button onClick={() => openPrd(open.prdFile)}
+                          title="Open the PDF in a new tab"
+                          className="text-base truncate"
+                          style={{ flex: 1, minWidth: 0, textAlign: "left", border: "none",
+                                   background: "none", color: C.accent,
+                                   textDecoration: "underline", cursor: "pointer" }}>
+                    {open.prdFile.name} ↗
+                  </button>
+
+                  {open.prdFile.size && (
+                    <span className="text-sm shrink-0" style={{ color: C.faint }}>
+                      {prettySize(open.prdFile.size)}
+                    </span>
                   )}
-                </label>
-              ))}
+
+                  <label className="text-sm px-3 py-1.5 rounded shrink-0"
+                         style={{ border: `1px solid ${C.rule}`, background: "#fff",
+                                  color: C.body, cursor: "pointer" }}>
+                    Replace
+                    <input type="file" accept="application/pdf,.pdf" style={{ display: "none" }}
+                           onChange={(e) => { setPrdFile(open.id, e.target.files); e.target.value = ""; }} />
+                  </label>
+
+                  {armedPrd ? (
+                    <button onClick={() => { removePrd(open.id, open.prdFile); setArmedPrd(false); }}
+                            className="text-sm px-3 py-1.5 rounded shrink-0"
+                            style={{ background: STATUS.Blocked.bg, color: STATUS.Blocked.fg,
+                                     border: "none", cursor: "pointer" }}>
+                      Sure?
+                    </button>
+                  ) : (
+                    <button onClick={() => setArmedPrd(true)}
+                            className="text-sm px-3 py-1.5 rounded shrink-0"
+                            style={{ border: `1px solid ${C.rule}`, background: "#fff",
+                                     color: C.mute, cursor: "pointer" }}>
+                      Remove
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div
+                  onDragOver={(e) => { e.preventDefault(); setPrdDrop(true); }}
+                  onDragLeave={() => setPrdDrop(false)}
+                  onDrop={(e) => {
+                    e.preventDefault(); setPrdDrop(false);
+                    setPrdFile(open.id, e.dataTransfer.files);
+                  }}
+                  className="rounded-lg px-4 py-5 text-center"
+                  style={{
+                    border: `2px dashed ${prdDrop ? C.accent : C.rule}`,
+                    background: prdDrop ? "#F4F8FD" : "#FCFCFD",
+                  }}>
+                  <p className="text-base mb-2" style={{ color: C.body }}>
+                    {prdBusy ? "Attaching…" : "Drop the PRD here, or"}
+                  </p>
+                  <label className="text-base px-3.5 py-2 rounded inline-block"
+                         style={{ border: `1px solid ${C.rule}`, background: "#fff",
+                                  color: C.accent, cursor: "pointer" }}>
+                    Choose a PDF
+                    <input type="file" accept="application/pdf,.pdf" style={{ display: "none" }}
+                           onChange={(e) => { setPrdFile(open.id, e.target.files); e.target.value = ""; }} />
+                  </label>
+                  <p className="text-sm mt-2" style={{ color: C.faint }}>
+                    Up to {prettySize(PDF_LIMIT)}
+                  </p>
+                </div>
+              )}
+
+              {prdError && (
+                <p className="text-sm mt-2" style={{ color: DUE_TONE.late.fg }}>{prdError}</p>
+              )}
             </div>
+
+            <label className="block mt-4">
+              <span className="block text-sm mb-2" style={{ color: C.mute }}>Admin URL</span>
+              <input style={inputStyle} value={open.adminUrl || ""}
+                     placeholder="https://admin.arenaclub.com/…"
+                     onChange={(e) => patch(open.id, { adminUrl: e.target.value })} />
+              {open.adminUrl && open.adminUrl.trim() && (
+                <a href={asHref(open.adminUrl)} target="_blank" rel="noreferrer"
+                   title={asHref(open.adminUrl)}
+                   className="block text-sm mt-1.5 truncate"
+                   style={{ color: C.accent, textDecoration: "underline" }}>
+                  {open.adminUrl.replace(/^https?:\/\//i, "")} ↗
+                </a>
+              )}
+            </label>
 
             <label className="block mt-4">
               <span className="block text-sm mb-2" style={{ color: C.mute }}>Next action</span>
