@@ -75,7 +75,7 @@ const STATUS = {
   "In progress":    { bg: "#E5EFFB", fg: "#22558F", dot: "#3D7EC4" },
   "Ready to build": { bg: "#FCF1D8", fg: "#8A5B00", dot: "#C89327" },
   Blocked:          { bg: "#FBE7E6", fg: "#A63A2E", dot: "#C4544A" },
-  "Deferred / other": { bg: "#EDEDF3", fg: "#535370", dot: "#7C7C99" },
+  "Deferred / other": { bg: "#EFE7F1", fg: "#6B4A73", dot: "#9C6FA6" },
   "Needs discovery":  { bg: "#EEF0F2", fg: "#5A636C", dot: "#8B949D" },
   "Up for discussion": { bg: "#E2F0EF", fg: "#1F6B66", dot: "#3E9791" },
   History:            { bg: "#E4F3E9", fg: "#237748", dot: "#3B9A69" },
@@ -89,7 +89,7 @@ const BOARDS = {
     /* Shipped is terminal: choosing it stamps the finish date, takes the row
        off this board, and files it under History. It sits last in the list
        because it is an exit, not a stage. */
-    statuses: ["In progress", "Ready to build", "Blocked", "Deferred / other", "Needs discovery", "Shipped"],
+    statuses: ["In progress", "Ready to build", "Blocked", "Needs discovery", "Deferred / other", "Shipped"],
     columns: [
       { key: "item",        label: "PRD name",                w: 1.3 },
       { key: "phase",       label: "Phase",                   w: 0.9 },
@@ -110,7 +110,7 @@ const BOARDS = {
     byline: "Ops and warehouse intake · reviewed weekly · source: intake sheet",
     /* intake is a holding pen, not a build board. Nothing here is shipped
        or in flight — the moment it is picked up it moves to the roadmap. */
-    statuses: ["Up for discussion", "Blocked", "Deferred / other", "Needs discovery"],
+    statuses: ["Up for discussion", "Blocked", "Needs discovery", "Deferred / other"],
     columns: [
       { key: "item",     label: "Request",           w: 1.3 },
       { key: "type",     label: "Type",              px: 110 },
@@ -125,6 +125,59 @@ const BOARDS = {
     ],
   },
 };
+
+/* Images live under their own keys, not inside the board document. The
+   board is saved as a single JSON blob on every edit — putting screenshots
+   in it would mean re-uploading every image on every keystroke. */
+const files = {
+  async put(id, payload) {
+    const r = await fetch("/api/files", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, name: payload.name, data: payload.dataUrl }),
+    });
+    if (!r.ok) {
+      let detail = `HTTP ${r.status}`;
+      try { const j = await r.json(); if (j && j.error) detail = j.error; } catch (e) {}
+      throw new Error(detail);
+    }
+    return r.json();
+  },
+  async get(id) {
+    const r = await fetch(`/api/files?id=${encodeURIComponent(id)}`);
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j && j.data ? { dataUrl: j.data, name: j.name } : null;
+  },
+  async del(id) {
+    try {
+      await fetch(`/api/files?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+    } catch (e) { /* already gone */ }
+  },
+};
+
+/* Downscale before storing. A phone screenshot is several megabytes and
+   nobody needs that to read a UI mock. */
+const compressImage = (file, maxPx = 1600, quality = 0.72) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("could not read that file"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error(`${file.name} is not an image`));
+      img.onload = () => {
+        const scale = Math.min(1, maxPx / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve({ dataUrl: canvas.toDataURL("image/jpeg", quality), w, h });
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
 
 /* Shipped is the old name, History the new one — both mean archived, and
    both display as Shipped in the History view. */
@@ -353,6 +406,7 @@ const PRD = [
 ].map((r) => ({
   ...r, id: slug("prd", r.item, r.phase), board: "prd", type: "",
   developer: r.developer || "",
+  prdLink: r.prdLink || "", adminUrl: r.adminUrl || "", images: r.images || [],
   analysisDoc: r.analysisDoc || "",
   due: r.due || "",
   finished: r.status === "Shipped" ? (r.finished || "") : "",
@@ -365,6 +419,7 @@ const mk = (item, status, owner, next, task, opts = {}) => ({
   phase: opts.phase || "—", type: opts.type || "", notes: opts.notes || "",
   due: opts.due || "", finished: opts.finished || "",
   developer: opts.developer || "",
+  prdLink: opts.prdLink || "", adminUrl: opts.adminUrl || "", images: [],
   blockers: opts.blockers || "", estimate: "", teams: opts.teams || "",
   impact: opts.impact || "",
 });
@@ -691,6 +746,10 @@ function Roadmap() {
   const [histFilter, setHistFilter] = useState("All changes");
   const [saveState, setSaveState] = useState("idle");
   const [saveError, setSaveError] = useState("");
+  const [imgCache, setImgCache] = useState({});   // id -> dataUrl
+  const [imgBusy, setImgBusy] = useState(false);
+  const [imgError, setImgError] = useState("");
+  const [dropping, setDropping] = useState(false);
   const [newCount, setNewCount] = useState(0);
   const [sortDir, setSortDir] = useState("asc");
   const [query, setQuery] = useState("");
@@ -874,6 +933,39 @@ function Roadmap() {
               "Deferred / other": "Deferred / other", "Needs discovery": "Needs discovery" },
   };
 
+  /* Attachments. Each image is written under its own key and the item keeps
+     only the id, so saving the board stays cheap no matter how many are added. */
+  const addImages = async (itemId, fileList) => {
+    const incoming = Array.from(fileList || []).filter((f) => f.type.startsWith("image/"));
+    if (!incoming.length) return;
+
+    setImgBusy(true);
+    setImgError("");
+    const added = [];
+    for (const f of incoming) {
+      try {
+        const { dataUrl, w, h } = await compressImage(f);
+        const id = `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        await files.put(id, { dataUrl, name: f.name, w, h });
+        setImgCache((c) => ({ ...c, [id]: dataUrl }));
+        added.push({ id, name: f.name });
+      } catch (err) {
+        setImgError(String(err.message || err));
+      }
+    }
+    if (added.length) {
+      const current = items.find((i) => i.id === itemId);
+      patch(itemId, { images: [...((current && current.images) || []), ...added] });
+    }
+    setImgBusy(false);
+  };
+
+  const removeImage = async (itemId, imgId) => {
+    const current = items.find((i) => i.id === itemId);
+    patch(itemId, { images: ((current && current.images) || []).filter((x) => x.id !== imgId) });
+    await files.del(imgId);
+  };
+
   const moveBoard = (id, to) => {
     const it = items.find((x) => x.id === id);
     if (!it) return;
@@ -892,7 +984,9 @@ function Roadmap() {
 
   /* status sections, in pipeline order. The last two are cold — they get
      pushed below a hard break rather than mixed into the live work. */
-  const BACKBURNER = ["Deferred / other", "Needs discovery"];
+  /* Needs discovery is real work waiting on a spec, so it stays above the
+     line. Only work parked on purpose goes below it. */
+  const BACKBURNER = ["Deferred / other"];
   const groups = useMemo(
     () => cfg.statuses.map((st) => ({
       status: st,
@@ -1129,6 +1223,7 @@ function Roadmap() {
     const fresh = {
       id: `new-${Date.now()}`, board, item: "New item", phase: "—", status: "Needs discovery",
       owner: "", developer: "", next: "Write spec / define scope", task: "", notes: "",
+      prdLink: "", adminUrl: "", images: [],
       blockers: "", estimate: "", teams: "", impact: "", type: "",
     };
     setItems((p) => [fresh, ...p]);
@@ -1159,6 +1254,24 @@ function Roadmap() {
   const discovery = countOf("Needs discovery");
 
   const open = items.find((i) => i.id === openId) || null;
+
+  /* fetch only what the open row needs, once */
+  useEffect(() => {
+    if (!open || !open.images || !open.images.length) return;
+    let cancelled = false;
+    (async () => {
+      for (const img of open.images) {
+        if (imgCache[img.id]) continue;
+        try {
+          const rec = await files.get(img.id);
+          if (!cancelled && rec && rec.dataUrl) {
+            setImgCache((c) => ({ ...c, [img.id]: rec.dataUrl }));
+          }
+        } catch (e) { /* missing attachment — the tile shows a placeholder */ }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [openId, open && open.images && open.images.length]);
 
   /* history, newest first, grouped under a day heading */
   const histEvents = useMemo(() => {
@@ -1428,9 +1541,8 @@ function Roadmap() {
             <>
               {searched.length} requests are on file, none of them started — anything picked up
               moves to the roadmap. {countOf("Up for discussion")} {countOf("Up for discussion") === 1 ? "is" : "are"} up
-              for discussion, {blocked} blocked on an open question, and {deferred + discovery} on
-              the backburner ({deferred} parked on purpose, {discovery} needing a written spec
-              before they can be sized).
+              for discussion, {blocked} blocked on an open question, {discovery} needing a written
+              spec before they can be sized, and {deferred} parked on the backburner.
             </>
           )}
           {overdue > 0 && (
@@ -1573,10 +1685,17 @@ function Roadmap() {
               return (
                 <React.Fragment key={g.status}>
                   {firstBackburner && (
-                    <div className="mt-12 mb-2 pt-7" style={{ borderTop: `3px solid ${C.rule}` }}>
-                      <h3 className="text-2xl font-semibold" style={{ color: C.mute }}>Backburner</h3>
-                      <p className="text-base mt-1.5" style={{ color: C.faint, maxWidth: "72ch" }}>
-                        Parked on purpose, or waiting on a written spec. Nothing below this line is scheduled.
+                    <div className="mt-12 mb-2 pt-7 px-4 pb-5 rounded-lg"
+                         style={{
+                           borderTop: `3px solid ${STATUS["Deferred / other"].dot}`,
+                           background: "#FBF8FC",
+                         }}>
+                      <h3 className="text-2xl font-semibold"
+                          style={{ color: STATUS["Deferred / other"].fg }}>Backburner</h3>
+                      <p className="text-base mt-1.5"
+                         style={{ color: STATUS["Deferred / other"].fg, opacity: 0.75, maxWidth: "72ch" }}>
+                        Parked on purpose — skipped, sequenced behind something else, or waiting
+                        on a decision that has not been made. Nothing below this line is scheduled.
                       </p>
                     </div>
                   )}
@@ -1865,6 +1984,25 @@ function Roadmap() {
               </label>
             </div>
 
+            <div className="grid grid-cols-2 gap-3 mt-4">
+              {[
+                ["prdLink", "PRD link", "https://…"],
+                ["adminUrl", "Admin URL", "https://admin.arenaclub.com/…"],
+              ].map(([key, label, placeholder]) => (
+                <label key={key} className="block">
+                  <span className="flex items-baseline gap-2 text-sm mb-2" style={{ color: C.mute }}>
+                    {label}
+                    {open[key] && (
+                      <a href={open[key]} target="_blank" rel="noreferrer"
+                         style={{ color: C.accent, textDecoration: "underline" }}>open</a>
+                    )}
+                  </span>
+                  <input style={inputStyle} value={open[key] || ""} placeholder={placeholder}
+                         onChange={(e) => patch(open.id, { [key]: e.target.value })} />
+                </label>
+              ))}
+            </div>
+
             <label className="block mt-4">
               <span className="block text-sm mb-2" style={{ color: C.mute }}>Next action</span>
               <input style={inputStyle} value={open.next || ""}
@@ -1917,6 +2055,75 @@ function Roadmap() {
                         value={open.notes || ""}
                         onChange={(e) => patch(open.id, { notes: e.target.value })} />
             </label>
+
+            {/* attachments — drop, paste or browse; as many as needed */}
+            <div className="mt-6">
+              <span className="block text-sm mb-2" style={{ color: C.mute }}>
+                Images {open.images && open.images.length ? `(${open.images.length})` : ""}
+              </span>
+
+              <div
+                onDragOver={(e) => { e.preventDefault(); setDropping(true); }}
+                onDragLeave={() => setDropping(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDropping(false);
+                  addImages(open.id, e.dataTransfer.files);
+                }}
+                onPaste={(e) => {
+                  const f = e.clipboardData && e.clipboardData.files;
+                  if (f && f.length) { e.preventDefault(); addImages(open.id, f); }
+                }}
+                className="rounded-lg px-4 py-6 text-center"
+                style={{
+                  border: `2px dashed ${dropping ? C.accent : C.rule}`,
+                  background: dropping ? "#F4F8FD" : "#FCFCFD",
+                }}>
+                <p className="text-base mb-2" style={{ color: C.body }}>
+                  {imgBusy ? "Adding…" : "Drop images here, paste a screenshot, or"}
+                </p>
+                <label className="text-base px-3.5 py-2 rounded inline-block"
+                       style={{ border: `1px solid ${C.rule}`, background: "#fff",
+                                color: C.accent, cursor: "pointer" }}>
+                  Choose files
+                  <input type="file" accept="image/*" multiple style={{ display: "none" }}
+                         onChange={(e) => { addImages(open.id, e.target.files); e.target.value = ""; }} />
+                </label>
+                <p className="text-sm mt-2" style={{ color: C.faint }}>
+                  Resized to 1600px and stored separately from the board
+                </p>
+                {imgError && (
+                  <p className="text-sm mt-2" style={{ color: DUE_TONE.late.fg }}>{imgError}</p>
+                )}
+              </div>
+
+              {open.images && open.images.length > 0 && (
+                <div className="flex flex-wrap gap-3 mt-3">
+                  {open.images.map((img) => (
+                    <div key={img.id} className="rounded-lg overflow-hidden"
+                         style={{ border: `1px solid ${C.rule}`, width: 148 }}>
+                      {imgCache[img.id] ? (
+                        <a href={imgCache[img.id]} target="_blank" rel="noreferrer" title={img.name}>
+                          <img src={imgCache[img.id]} alt={img.name}
+                               style={{ width: "100%", height: 96, objectFit: "cover", display: "block" }} />
+                        </a>
+                      ) : (
+                        <div style={{ height: 96, background: C.shell }} />
+                      )}
+                      <div className="flex items-center gap-2 px-2 py-1.5">
+                        <span className="text-sm truncate" style={{ color: C.body, flex: 1 }}>
+                          {img.name}
+                        </span>
+                        <button onClick={() => removeImage(open.id, img.id)}
+                                title="Remove this image" className="text-sm"
+                                style={{ color: C.faint, border: "none", background: "none",
+                                         cursor: "pointer" }}>×</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
 
             <div className="flex flex-wrap items-center gap-3 pt-5 pb-10">
               <button onClick={() => setOpenId(null)}

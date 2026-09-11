@@ -7,10 +7,24 @@ in `api/`, Neon Postgres behind it.
 
 ```
 public/index.html   page shell, loads React + Tailwind + Babel from CDNs
-public/app.jsx      the whole app
+public/app.jsx      generated — run build.py, do not hand-edit
 api/state.js        GET / POST the saved board
-schema.sql          one table
+api/files.js        GET / POST / DELETE one image
+api/health.js       why saving is failing
+api/_db.js          connection + table creation, shared
+schema.sql          two tables
+build.py            regenerates public/app.jsx from the source component
 ```
+
+## Attachments
+
+Images are downscaled to 1600px in the browser, then written to `app_files`
+one row each. The item keeps only the id and filename.
+
+They are deliberately **not** stored in the board document. The board is a
+single JSON blob rewritten on every edit — an image inside it would be
+re-uploaded on every keystroke. Images load only when you open the row that
+owns them.
 
 ## Deploy
 

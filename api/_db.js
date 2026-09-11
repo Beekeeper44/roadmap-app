@@ -51,6 +51,22 @@ export async function ensureTable(sql) {
   ensured = true;
 }
 
+/* Attachments get their own table. The board is rewritten on every edit, so
+   images living inside it would be re-uploaded on every keystroke. */
+let ensuredFiles = false;
+export async function ensureFiles(sql) {
+  if (ensuredFiles) return;
+  await sql`
+    CREATE TABLE IF NOT EXISTS app_files (
+      id         text PRIMARY KEY,
+      name       text,
+      data       text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )
+  `;
+  ensuredFiles = true;
+}
+
 export function missingUrlPayload() {
   return {
     error: "No database connection string found in the environment.",
