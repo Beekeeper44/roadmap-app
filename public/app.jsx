@@ -190,7 +190,13 @@ const compressImage = (file, maxPx = 1600, quality = 0.72) =>
         const canvas = document.createElement("canvas");
         canvas.width = w; canvas.height = h;
         canvas.getContext("2d").drawImage(img, 0, 0, w, h);
-        resolve({ dataUrl: canvas.toDataURL("image/jpeg", quality), w, h });
+        /* A PNG of a spreadsheet is mostly text, and JPEG smears text. Keep
+           PNG lossless and only re-encode photographs. */
+        const png = file.type === "image/png";
+        const dataUrl = png
+          ? canvas.toDataURL("image/png")
+          : canvas.toDataURL("image/jpeg", quality);
+        resolve({ dataUrl, w, h });
       };
       img.src = reader.result;
     };
@@ -446,7 +452,8 @@ const PRD = [
 ].map((r) => ({
   ...r, id: slug("prd", r.item, r.phase), board: "prd", type: "",
   developer: r.developer || "",
-  prdFile: r.prdFile || null, adminUrl: r.adminUrl || "", images: r.images || [],
+  prdFile: r.prdFile || null, adminUrl: r.adminUrl || "",
+  images: r.images || [], impactImages: r.impactImages || [],
   analysisDoc: r.analysisDoc || "",
   due: r.due || "",
   finished: r.status === "Shipped" ? (r.finished || "") : "",
@@ -459,7 +466,7 @@ const mk = (item, status, owner, next, task, opts = {}) => ({
   phase: opts.phase || "—", type: opts.type || "", notes: opts.notes || "",
   due: opts.due || "", finished: opts.finished || "",
   developer: opts.developer || "",
-  prdFile: null, adminUrl: opts.adminUrl || "", images: [],
+  prdFile: null, adminUrl: opts.adminUrl || "", images: [], impactImages: [],
   blockers: opts.blockers || "", estimate: "", teams: opts.teams || "",
   impact: opts.impact || "",
 });
@@ -796,6 +803,7 @@ function Roadmap() {
   const [prdBusy, setPrdBusy] = useState(false);
   const [prdError, setPrdError] = useState("");
   const [prdDrop, setPrdDrop] = useState(false);
+  const [impactDrop, setImpactDrop] = useState(false);
   const [armedPrd, setArmedPrd] = useState(false);
   const [newCount, setNewCount] = useState(0);
   const [sortDir, setSortDir] = useState("asc");
@@ -983,7 +991,7 @@ function Roadmap() {
 
   /* Attachments. Each image is written under its own key and the item keeps
      only the id, so saving the board stays cheap no matter how many are added. */
-  const addImages = async (itemId, fileList) => {
+  const addImages = async (itemId, fileList, field = "images") => {
     const incoming = Array.from(fileList || []).filter((f) => f.type.startsWith("image/"));
     if (!incoming.length) return;
 
@@ -1003,7 +1011,7 @@ function Roadmap() {
     }
     if (added.length) {
       const current = items.find((i) => i.id === itemId);
-      patch(itemId, { images: [...((current && current.images) || []), ...added] });
+      patch(itemId, { [field]: [...((current && current[field]) || []), ...added] });
     }
     setImgBusy(false);
   };
@@ -1058,9 +1066,11 @@ function Roadmap() {
     if (rec && rec.id) await files.del(rec.id);
   };
 
-  const removeImage = async (itemId, imgId) => {
+  const removeImage = async (itemId, imgId, field = "images") => {
     const current = items.find((i) => i.id === itemId);
-    patch(itemId, { images: ((current && current.images) || []).filter((x) => x.id !== imgId) });
+    patch(itemId, {
+      [field]: ((current && current[field]) || []).filter((x) => x.id !== imgId),
+    });
     await files.del(imgId);
   };
 
@@ -1321,7 +1331,7 @@ function Roadmap() {
     const fresh = {
       id: `new-${Date.now()}`, board, item: "New item", phase: "—", status: "Needs discovery",
       owner: "", developer: "", next: "Write spec / define scope", task: "", notes: "",
-      prdFile: null, adminUrl: "", images: [],
+      prdFile: null, adminUrl: "", images: [], impactImages: [],
       blockers: "", estimate: "", teams: "", impact: "", type: "",
     };
     setItems((p) => [fresh, ...p]);
@@ -1357,10 +1367,12 @@ function Roadmap() {
   useEffect(() => { setArmedPrd(false); setArmedDelete(null); setPrdError(""); }, [openId]);
 
   useEffect(() => {
-    if (!open || !open.images || !open.images.length) return;
+    if (!open) return;
+    const all = [...(open.images || []), ...(open.impactImages || [])];
+    if (!all.length) return;
     let cancelled = false;
     (async () => {
-      for (const img of open.images) {
+      for (const img of all) {
         if (imgCache[img.id]) continue;
         try {
           const rec = await files.get(img.id);
@@ -1371,7 +1383,9 @@ function Roadmap() {
       }
     })();
     return () => { cancelled = true; };
-  }, [openId, open && open.images && open.images.length]);
+  }, [openId,
+      open && open.images && open.images.length,
+      open && open.impactImages && open.impactImages.length]);
 
   /* history, newest first, grouped under a day heading */
   const histEvents = useMemo(() => {
@@ -2250,6 +2264,99 @@ function Roadmap() {
                 </a>
               )}
             </label>
+
+            {/* Impact — evidence for the business case. Click a tile and it
+                opens in a new tab, since these are usually numbers you want
+                side by side with something else. */}
+            <div className="mt-4">
+              <span className="block text-sm mb-2" style={{ color: C.mute }}>
+                Impact {open.impactImages && open.impactImages.length
+                  ? `(${open.impactImages.length})` : ""}
+              </span>
+
+              <div
+                onDragOver={(e) => { e.preventDefault(); setImpactDrop(true); }}
+                onDragLeave={() => setImpactDrop(false)}
+                onDrop={(e) => {
+                  e.preventDefault(); setImpactDrop(false);
+                  addImages(open.id, e.dataTransfer.files, "impactImages");
+                }}
+                onPaste={(e) => {
+                  const f = e.clipboardData && e.clipboardData.files;
+                  if (f && f.length) { e.preventDefault(); addImages(open.id, f, "impactImages"); }
+                }}
+                className="rounded-lg px-4 py-5 text-center"
+                style={{
+                  border: `2px dashed ${impactDrop ? C.accent : C.rule}`,
+                  background: impactDrop ? "#F4F8FD" : "#FCFCFD",
+                }}>
+                <p className="text-base mb-2" style={{ color: C.body }}>
+                  Drop the impact numbers here, paste a screenshot, or
+                </p>
+                <label className="text-base px-3.5 py-2 rounded inline-block"
+                       style={{ border: `1px solid ${C.rule}`, background: "#fff",
+                                color: C.accent, cursor: "pointer" }}>
+                  Choose files
+                  <input type="file" accept="image/*" multiple style={{ display: "none" }}
+                         onChange={(e) => {
+                           addImages(open.id, e.target.files, "impactImages");
+                           e.target.value = "";
+                         }} />
+                </label>
+                <p className="text-sm mt-2" style={{ color: C.faint }}>
+                  PNGs stay lossless so figures remain readable
+                </p>
+              </div>
+
+              {open.impactImages && open.impactImages.length > 0 && (
+                <div className="flex flex-wrap gap-3 mt-3">
+                  {open.impactImages.map((img) => (
+                    <div key={img.id} className="rounded-lg overflow-hidden"
+                         style={{ border: `1px solid ${C.rule}`, width: 148 }}>
+                      {imgCache[img.id] ? (
+                        <button onClick={() => openInNewTab(imgCache[img.id], img.name)}
+                                title="Open in a new tab"
+                                style={{ display: "block", width: "100%", padding: 0,
+                                         border: "none", background: "none", cursor: "pointer" }}>
+                          <img src={imgCache[img.id]} alt={img.name}
+                               style={{ width: "100%", height: 96, objectFit: "cover",
+                                        display: "block" }} />
+                        </button>
+                      ) : (
+                        <div className="flex items-center justify-center text-sm"
+                             style={{ height: 96, background: C.shell, color: C.faint }}>
+                          loading…
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2 px-2 py-1.5">
+                        <span className="text-sm truncate" style={{ color: C.body, flex: 1 }}
+                              title={img.name}>{img.name}</span>
+                        {armedDelete === img.id ? (
+                          <button
+                            onClick={() => {
+                              removeImage(open.id, img.id, "impactImages");
+                              setArmedDelete(null);
+                            }}
+                            className="text-sm px-2 rounded shrink-0"
+                            style={{ background: STATUS.Blocked.bg, color: STATUS.Blocked.fg,
+                                     border: "none", cursor: "pointer" }}>
+                            Sure?
+                          </button>
+                        ) : (
+                          <button onClick={() => setArmedDelete(img.id)}
+                                  title="Delete this image"
+                                  className="text-base px-1.5 rounded shrink-0"
+                                  style={{ color: C.mute, border: `1px solid ${C.rule}`,
+                                           background: "#fff", cursor: "pointer" }}>
+                            ×
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
 
             <label className="block mt-4">
               <span className="block text-sm mb-2" style={{ color: C.mute }}>Next action</span>
