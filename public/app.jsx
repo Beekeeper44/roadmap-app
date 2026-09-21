@@ -453,7 +453,8 @@ const PRD = [
 ].map((r) => ({
   ...r, id: slug("prd", r.item, r.phase), board: "prd", type: "",
   developer: r.developer || "",
-  prdFile: r.prdFile || null, prdFlag: r.prdFlag || false, adminUrl: r.adminUrl || "",
+  prdFile: r.prdFile || null, prdFlag: r.prdFlag || false,
+  impactFlag: r.impactFlag || false, adminUrl: r.adminUrl || "",
   images: r.images || [], impactImages: r.impactImages || [],
   analysisDoc: r.analysisDoc || "",
   due: r.due || "",
@@ -467,7 +468,7 @@ const mk = (item, status, owner, next, task, opts = {}) => ({
   phase: opts.phase || "—", type: opts.type || "", notes: opts.notes || "",
   due: opts.due || "", finished: opts.finished || "",
   developer: opts.developer || "",
-  prdFile: null, prdFlag: false, adminUrl: opts.adminUrl || "",
+  prdFile: null, prdFlag: false, impactFlag: false, adminUrl: opts.adminUrl || "",
   images: [], impactImages: [],
   blockers: opts.blockers || "", estimate: "", teams: opts.teams || "",
   impact: opts.impact || "",
@@ -993,24 +994,47 @@ function Roadmap() {
 
   /* Attachments. Each image is written under its own key and the item keeps
      only the id, so saving the board stays cheap no matter how many are added. */
-  const addImages = async (itemId, fileList, field = "images") => {
-    const incoming = Array.from(fileList || []).filter((f) => f.type.startsWith("image/"));
-    if (!incoming.length) return;
+  const addImages = async (itemId, fileList, field = "images", allowPdf = false) => {
+    const all = Array.from(fileList || []);
+    const isPdf = (f) => f.type === "application/pdf" || /\.pdf$/i.test(f.name);
+    const incoming = all.filter((f) => f.type.startsWith("image/") || (allowPdf && isPdf(f)));
+
+    if (!incoming.length) {
+      setImgError(all.length
+        ? `Not accepted here: ${all.map((f) => f.name).join(", ")}`
+        : "");
+      return;
+    }
 
     setImgBusy(true);
     setImgError("");
     const added = [];
+
     for (const f of incoming) {
       try {
-        const { dataUrl, w, h } = await compressImage(f);
-        const id = `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        await files.put(id, { dataUrl, name: f.name, w, h });
-        setImgCache((c) => ({ ...c, [id]: dataUrl }));
-        added.push({ id, name: f.name });
+        if (isPdf(f)) {
+          /* PDFs go in whole — there is nothing to downscale */
+          if (f.size > PDF_LIMIT) {
+            setImgError(`${f.name} is ${prettySize(f.size)} — the limit is ${prettySize(PDF_LIMIT)}`);
+            continue;
+          }
+          const dataUrl = await readAsDataUrl(f);
+          const id = `pdf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          await files.put(id, { dataUrl, name: f.name });
+          setImgCache((c) => ({ ...c, [id]: dataUrl }));
+          added.push({ id, name: f.name, kind: "pdf", size: f.size });
+        } else {
+          const { dataUrl } = await compressImage(f);
+          const id = `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          await files.put(id, { dataUrl, name: f.name });
+          setImgCache((c) => ({ ...c, [id]: dataUrl }));
+          added.push({ id, name: f.name, kind: "image" });
+        }
       } catch (err) {
         setImgError(String(err.message || err));
       }
     }
+
     if (added.length) {
       const current = items.find((i) => i.id === itemId);
       patch(itemId, { [field]: [...((current && current[field]) || []), ...added] });
@@ -1137,7 +1161,7 @@ function Roadmap() {
         {/* position within this section — renumbers itself as rows move.
             The tick says a PRD is attached, without opening the row. */}
         <span className="flex items-baseline gap-1.5"
-              style={{ width: 62, flexShrink: 0, cursor: canDrag ? "grab" : "default" }}
+              style={{ width: 80, flexShrink: 0, cursor: canDrag ? "grab" : "default" }}
               title={canDrag ? "Drag to reorder, or drop on another section to move it" : "Clear the sort to drag rows"}>
           <span className="text-base tabular-nums" style={{ color: C.faint }}>
             {idx + 1}
@@ -1159,6 +1183,26 @@ function Roadmap() {
                 cursor: "pointer",
                 color: i.prdFlag ? C.accent : C.rule,
               }}>
+              ✓
+            </button>
+          )}
+          {(i.impactImages && i.impactImages.length) || i.impactFlag ? (
+            <span className="text-base" style={{ color: STATUS.Shipped.fg }}
+                  title={i.impactImages && i.impactImages.length
+                    ? `Impact attached: ${i.impactImages.length} file${i.impactImages.length === 1 ? "" : "s"}`
+                    : "Marked as having impact evidence"}
+                  onClick={(e) => {
+                    if (i.impactImages && i.impactImages.length) return;   // reporting a fact
+                    e.stopPropagation();
+                    patch(i.id, { impactFlag: false });
+                  }}>✓</span>
+          ) : (
+            <button
+              onClick={(e) => { e.stopPropagation(); patch(i.id, { impactFlag: true }); }}
+              title="Click to mark that impact evidence exists"
+              className="text-base"
+              style={{ border: "none", background: "none", padding: 0, lineHeight: 1,
+                       cursor: "pointer", color: C.rule }}>
               ✓
             </button>
           )}
@@ -1354,7 +1398,8 @@ function Roadmap() {
     const fresh = {
       id: `new-${Date.now()}`, board, item: "New item", phase: "—", status: "Needs discovery",
       owner: "", developer: "", next: "Write spec / define scope", task: "", notes: "",
-      prdFile: null, prdFlag: false, adminUrl: "", images: [], impactImages: [],
+      prdFile: null, prdFlag: false, impactFlag: false, adminUrl: "",
+      images: [], impactImages: [],
       blockers: "", estimate: "", teams: "", impact: "", type: "",
     };
     setItems((p) => [fresh, ...p]);
@@ -1397,6 +1442,7 @@ function Roadmap() {
     let cancelled = false;
     (async () => {
       for (const img of all) {
+        if (img.kind === "pdf") continue;      // fetched on click instead
         if (imgCache[img.id]) continue;
         try {
           const rec = await files.get(img.id);
@@ -1774,7 +1820,7 @@ function Roadmap() {
 
         {/* table — scrolls sideways so nothing gets crushed */}
         <div className="overflow-x-auto" style={{ borderTop: `1px solid ${C.rule}` }}>
-         <div style={{ minWidth: board === "prd" ? 1900 : 1740 }}>
+         <div style={{ minWidth: board === "prd" ? 1920 : 1760 }}>
           <div className="hidden sm:flex gap-4 px-3 py-3.5 text-sm"
                style={{ color: C.mute, borderBottom: `1px solid ${C.rule}` }}>
             <span style={{ width: 26, flexShrink: 0 }} />
@@ -2333,11 +2379,11 @@ function Roadmap() {
                 onDragLeave={() => setImpactDrop(false)}
                 onDrop={(e) => {
                   e.preventDefault(); setImpactDrop(false);
-                  addImages(open.id, e.dataTransfer.files, "impactImages");
+                  addImages(open.id, e.dataTransfer.files, "impactImages", true);
                 }}
                 onPaste={(e) => {
                   const f = e.clipboardData && e.clipboardData.files;
-                  if (f && f.length) { e.preventDefault(); addImages(open.id, f, "impactImages"); }
+                  if (f && f.length) { e.preventDefault(); addImages(open.id, f, "impactImages", true); }
                 }}
                 className="rounded-lg px-4 py-5 text-center"
                 style={{
@@ -2345,20 +2391,21 @@ function Roadmap() {
                   background: impactDrop ? "#F4F8FD" : "#FCFCFD",
                 }}>
                 <p className="text-base mb-2" style={{ color: C.body }}>
-                  Drop the impact numbers here, paste a screenshot, or
+                  Drop images or a PDF here, paste a screenshot, or
                 </p>
                 <label className="text-base px-3.5 py-2 rounded inline-block"
                        style={{ border: `1px solid ${C.rule}`, background: "#fff",
                                 color: C.accent, cursor: "pointer" }}>
                   Choose files
-                  <input type="file" accept="image/*" multiple style={{ display: "none" }}
+                  <input type="file" accept="image/*,application/pdf,.pdf" multiple
+                         style={{ display: "none" }}
                          onChange={(e) => {
-                           addImages(open.id, e.target.files, "impactImages");
+                           addImages(open.id, e.target.files, "impactImages", true);
                            e.target.value = "";
                          }} />
                 </label>
                 <p className="text-sm mt-2" style={{ color: C.faint }}>
-                  PNGs stay lossless so figures remain readable. Click a tile to view it.
+                  PNGs stay lossless so figures remain readable. PDFs open in a new tab.
                 </p>
               </div>
 
@@ -2367,7 +2414,28 @@ function Roadmap() {
                   {open.impactImages.map((img) => (
                     <div key={img.id} className="rounded-lg overflow-hidden"
                          style={{ border: `1px solid ${C.rule}`, width: 148 }}>
-                      {imgCache[img.id] ? (
+                      {img.kind === "pdf" ? (
+                        <button
+                          onClick={async () => {
+                            let d = imgCache[img.id];
+                            if (!d) {
+                              const rec = await files.get(img.id);
+                              d = rec && rec.dataUrl;
+                              if (d) setImgCache((c) => ({ ...c, [img.id]: d }));
+                            }
+                            const ok = d && await openInNewTab(d, img.name);
+                            if (!ok) setImgError("Your browser blocked the new tab.");
+                          }}
+                          title={`Open ${img.name}`}
+                          className="flex flex-col items-center justify-center gap-1 w-full"
+                          style={{ height: 96, background: "#F4F8FD", border: "none",
+                                   cursor: "pointer" }}>
+                          <span className="text-base" style={{ color: C.accent }}>PDF</span>
+                          <span className="text-sm" style={{ color: C.faint }}>
+                            {img.size ? prettySize(img.size) : "open ↗"}
+                          </span>
+                        </button>
+                      ) : imgCache[img.id] ? (
                         <button onClick={() => setLightbox({ ...img, field: "impactImages" })}
                                 title="Click to view full size"
                                 style={{ display: "block", width: "100%", padding: 0,
