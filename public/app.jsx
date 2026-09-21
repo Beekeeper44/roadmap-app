@@ -218,10 +218,11 @@ const openInNewTab = async (dataUrl, name) => {
     const blob = await (await fetch(dataUrl)).blob();
     const url = URL.createObjectURL(blob);
     const win = window.open(url, "_blank");
-    if (!win) URL.revokeObjectURL(url);          // popup blocked
-    else setTimeout(() => URL.revokeObjectURL(url), 60000);
+    if (!win) { URL.revokeObjectURL(url); return false; }   // pop-up blocked
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    return true;
   } catch (e) {
-    /* ignore — the in-app viewer still works */
+    return false;
   }
 };
 
@@ -452,7 +453,7 @@ const PRD = [
 ].map((r) => ({
   ...r, id: slug("prd", r.item, r.phase), board: "prd", type: "",
   developer: r.developer || "",
-  prdFile: r.prdFile || null, adminUrl: r.adminUrl || "",
+  prdFile: r.prdFile || null, prdFlag: r.prdFlag || false, adminUrl: r.adminUrl || "",
   images: r.images || [], impactImages: r.impactImages || [],
   analysisDoc: r.analysisDoc || "",
   due: r.due || "",
@@ -466,7 +467,8 @@ const mk = (item, status, owner, next, task, opts = {}) => ({
   phase: opts.phase || "—", type: opts.type || "", notes: opts.notes || "",
   due: opts.due || "", finished: opts.finished || "",
   developer: opts.developer || "",
-  prdFile: null, adminUrl: opts.adminUrl || "", images: [], impactImages: [],
+  prdFile: null, prdFlag: false, adminUrl: opts.adminUrl || "",
+  images: [], impactImages: [],
   blockers: opts.blockers || "", estimate: "", teams: opts.teams || "",
   impact: opts.impact || "",
 });
@@ -1132,13 +1134,34 @@ function Roadmap() {
           background: dragging ? "#FAFBFC" : "transparent",
           opacity: dragging ? 0.5 : 1,
         }}>
-        {/* position within this section — renumbers itself as rows move */}
+        {/* position within this section — renumbers itself as rows move.
+            The tick says a PRD is attached, without opening the row. */}
         <span className="flex items-baseline gap-1.5"
-              style={{ width: 44, flexShrink: 0, cursor: canDrag ? "grab" : "default" }}
+              style={{ width: 62, flexShrink: 0, cursor: canDrag ? "grab" : "default" }}
               title={canDrag ? "Drag to reorder, or drop on another section to move it" : "Clear the sort to drag rows"}>
           <span className="text-base tabular-nums" style={{ color: C.faint }}>
             {idx + 1}
           </span>
+          {i.prdFile ? (
+            /* attached — the tick reports a fact, so it is not a toggle */
+            <span className="text-base" style={{ color: C.accent }}
+                  title={`PRD attached: ${i.prdFile.name}`}>✓</span>
+          ) : (
+            /* no file, but the PRD may exist elsewhere — click to say so */
+            <button
+              onClick={(e) => { e.stopPropagation(); patch(i.id, { prdFlag: !i.prdFlag }); }}
+              title={i.prdFlag
+                ? "Marked as having a PRD — click to clear"
+                : "Click to mark that a PRD exists"}
+              className="text-base"
+              style={{
+                border: "none", background: "none", padding: 0, lineHeight: 1,
+                cursor: "pointer",
+                color: i.prdFlag ? C.accent : C.rule,
+              }}>
+              ✓
+            </button>
+          )}
           <span style={{ color: C.rule, fontSize: 13 }}>{canDrag ? "⠿" : ""}</span>
         </span>
 
@@ -1331,7 +1354,7 @@ function Roadmap() {
     const fresh = {
       id: `new-${Date.now()}`, board, item: "New item", phase: "—", status: "Needs discovery",
       owner: "", developer: "", next: "Write spec / define scope", task: "", notes: "",
-      prdFile: null, adminUrl: "", images: [], impactImages: [],
+      prdFile: null, prdFlag: false, adminUrl: "", images: [], impactImages: [],
       blockers: "", estimate: "", teams: "", impact: "", type: "",
     };
     setItems((p) => [fresh, ...p]);
@@ -1365,6 +1388,7 @@ function Roadmap() {
 
   /* fetch only what the open row needs, once */
   useEffect(() => { setArmedPrd(false); setArmedDelete(null); setPrdError(""); }, [openId]);
+  useEffect(() => { setImgError(""); }, [lightbox]);
 
   useEffect(() => {
     if (!open) return;
@@ -1505,8 +1529,17 @@ function Roadmap() {
                   <div key={i.id} onClick={() => setOpenId(i.id)}
                     className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 px-3 py-3.5 cursor-pointer"
                     style={{ borderBottom: `1px solid ${C.ruleSoft}` }}>
-                    <span className="text-base tabular-nums shrink-0"
-                          style={{ width: 44, color: C.faint }}>{n + 1}</span>
+                    <span className="flex items-baseline gap-1.5 shrink-0" style={{ width: 62 }}>
+                      <span className="text-base tabular-nums" style={{ color: C.faint }}>
+                        {n + 1}
+                      </span>
+                      {(i.prdFile || i.prdFlag) && (
+                        <span className="text-base" style={{ color: C.accent }}
+                              title={i.prdFile ? `PRD attached: ${i.prdFile.name}` : "PRD exists"}>
+                          ✓
+                        </span>
+                      )}
+                    </span>
                     <span className="text-lg font-medium" style={{ flex: "2 1 0", color: C.ink }}>
                       {i.item}
                     </span>
@@ -1741,7 +1774,7 @@ function Roadmap() {
 
         {/* table — scrolls sideways so nothing gets crushed */}
         <div className="overflow-x-auto" style={{ borderTop: `1px solid ${C.rule}` }}>
-         <div style={{ minWidth: board === "prd" ? 1880 : 1720 }}>
+         <div style={{ minWidth: board === "prd" ? 1900 : 1740 }}>
           <div className="hidden sm:flex gap-4 px-3 py-3.5 text-sm"
                style={{ color: C.mute, borderBottom: `1px solid ${C.rule}` }}>
             <span style={{ width: 26, flexShrink: 0 }} />
@@ -2017,7 +2050,10 @@ function Roadmap() {
             <span className="text-base truncate" style={{ flex: 1 }}>{lightbox.name}</span>
 
             <button
-              onClick={() => openInNewTab(imgCache[lightbox.id], lightbox.name)}
+              onClick={async () => {
+                const ok = await openInNewTab(imgCache[lightbox.id], lightbox.name);
+                if (!ok) setImgError("Your browser blocked the new tab — use Download instead.");
+              }}
               className="text-sm px-3 py-1.5 rounded"
               style={{ border: "1px solid rgba(255,255,255,0.35)", background: "transparent",
                        color: "#fff", cursor: "pointer" }}>
@@ -2034,7 +2070,7 @@ function Roadmap() {
             {armedDelete === lightbox.id ? (
               <button
                 onClick={() => {
-                  if (open) removeImage(open.id, lightbox.id);
+                  if (open) removeImage(open.id, lightbox.id, lightbox.field || "images");
                   setArmedDelete(null); setLightbox(null);
                 }}
                 className="text-sm px-3 py-1.5 rounded"
@@ -2060,8 +2096,14 @@ function Roadmap() {
             </button>
           </div>
 
-          <div className="flex-1 flex items-center justify-center px-5 pb-5"
+          <div className="flex-1 flex items-center justify-center px-5 pb-5 relative"
                onClick={() => { setLightbox(null); setArmedDelete(null); }}>
+            {imgError && (
+              <span className="absolute text-sm px-3 py-1.5 rounded"
+                    style={{ top: 64, background: DUE_TONE.late.bg, color: DUE_TONE.late.fg }}>
+                {imgError}
+              </span>
+            )}
             {imgCache[lightbox.id] ? (
               <img src={imgCache[lightbox.id]} alt={lightbox.name}
                    onClick={(e) => e.stopPropagation()}
@@ -2172,7 +2214,19 @@ function Roadmap() {
 
             {/* PRD lives as a PDF, so this is a file rather than a link */}
             <div className="mt-4">
-              <span className="block text-sm mb-2" style={{ color: C.mute }}>PRD (PDF)</span>
+              <span className="flex items-center gap-2 text-sm mb-2" style={{ color: C.mute }}>
+                PRD (PDF)
+                {!open.prdFile && (
+                  <button
+                    onClick={() => patch(open.id, { prdFlag: !open.prdFlag })}
+                    className="text-sm"
+                    style={{ border: "none", background: "none", padding: 0, cursor: "pointer",
+                             color: open.prdFlag ? C.accent : C.faint,
+                             textDecoration: "underline" }}>
+                    {open.prdFlag ? "✓ marked as having a PRD" : "mark as having a PRD"}
+                  </button>
+                )}
+              </span>
 
               {open.prdFile ? (
                 <div className="flex flex-wrap items-center gap-2 rounded-lg px-3 py-2.5"
@@ -2304,7 +2358,7 @@ function Roadmap() {
                          }} />
                 </label>
                 <p className="text-sm mt-2" style={{ color: C.faint }}>
-                  PNGs stay lossless so figures remain readable
+                  PNGs stay lossless so figures remain readable. Click a tile to view it.
                 </p>
               </div>
 
@@ -2314,10 +2368,10 @@ function Roadmap() {
                     <div key={img.id} className="rounded-lg overflow-hidden"
                          style={{ border: `1px solid ${C.rule}`, width: 148 }}>
                       {imgCache[img.id] ? (
-                        <button onClick={() => openInNewTab(imgCache[img.id], img.name)}
-                                title="Open in a new tab"
+                        <button onClick={() => setLightbox({ ...img, field: "impactImages" })}
+                                title="Click to view full size"
                                 style={{ display: "block", width: "100%", padding: 0,
-                                         border: "none", background: "none", cursor: "pointer" }}>
+                                         border: "none", background: "none", cursor: "zoom-in" }}>
                           <img src={imgCache[img.id]} alt={img.name}
                                style={{ width: "100%", height: 96, objectFit: "cover",
                                         display: "block" }} />
@@ -2458,7 +2512,8 @@ function Roadmap() {
                     <div key={img.id} className="rounded-lg overflow-hidden"
                          style={{ border: `1px solid ${C.rule}`, width: 148 }}>
                       {imgCache[img.id] ? (
-                        <button onClick={() => setLightbox(img)} title="Click to view full size"
+                        <button onClick={() => setLightbox({ ...img, field: "images" })}
+                                title="Click to view full size"
                                 style={{ display: "block", width: "100%", padding: 0,
                                          border: "none", background: "none", cursor: "zoom-in" }}>
                           <img src={imgCache[img.id]} alt={img.name}
