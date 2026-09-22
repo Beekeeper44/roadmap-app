@@ -72,6 +72,7 @@ const C = {
 /* status vocabulary, shared by the stat cards, pills and badges */
 const STATUS = {
   Shipped:          { bg: "#E4F3E9", fg: "#237748", dot: "#3B9A69" },
+  "In Dev":         { bg: "#E8E7FA", fg: "#3B3C96", dot: "#5E60C4" },
   "In progress":    { bg: "#E5EFFB", fg: "#22558F", dot: "#3D7EC4" },
   "Ready to build": { bg: "#FCF1D8", fg: "#8A5B00", dot: "#C89327" },
   Blocked:          { bg: "#FBE7E6", fg: "#A63A2E", dot: "#C4544A" },
@@ -89,7 +90,7 @@ const BOARDS = {
     /* Shipped is terminal: choosing it stamps the finish date, takes the row
        off this board, and files it under History. It sits last in the list
        because it is an exit, not a stage. */
-    statuses: ["In progress", "Ready to build", "Blocked", "Needs discovery", "Deferred / other", "Shipped"],
+    statuses: ["In Dev", "In progress", "Ready to build", "Blocked", "Needs discovery", "Deferred / other", "Shipped"],
     columns: [
       { key: "item",        label: "PRD name",                w: 1.3 },
       { key: "phase",       label: "Phase",                   w: 0.9 },
@@ -987,7 +988,7 @@ function Roadmap() {
               Shipped: "In progress",
               Blocked: "Blocked", "Deferred / other": "Deferred / other" },
     intake: { Shipped: "Up for discussion", History: "Up for discussion",
-              "In progress": "Up for discussion",
+              "In Dev": "Up for discussion", "In progress": "Up for discussion",
               "Ready to build": "Up for discussion", Blocked: "Blocked",
               "Deferred / other": "Deferred / other", "Needs discovery": "Needs discovery" },
   };
@@ -1726,7 +1727,8 @@ function Roadmap() {
           {board === "prd" ? (
             <>
               {searched.length} items are in flight, with {archived.filter((i) => i.board === "prd").length} shipped
-              and moved to History. {inprog} in active build, {ready} scoped and ready to schedule,
+              and moved to History. {countOf("In Dev")} in dev, {inprog} in active build,
+              {" "}{ready} scoped and ready to schedule,
               {" "}{blocked} blocked on an open question, {deferred} deliberately deferred,
               and {discovery} need a written spec before they can be sized.
             </>
